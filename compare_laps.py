@@ -3,27 +3,50 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from urllib.parse import quote
 
-# ================= SCEGLI COSA CONFRONTARE =================
-YEAR = 2025
-GRAND_PRIX = "Italian Grand Prix"
-SESSION = "Qualifying"      # Practice 1, Practice 2, Practice 3, Qualifying,
-                            # Sprint Qualifying, Sprint, Race
-DRIVERS = []                # vuoto = i primi due della classifica
-                            # oppure scegli tu, es. ["VER", "LEC", "NOR"]
-# ===========================================================
+DATA = "https://raw.githubusercontent.com/TracingInsights"
+SESSIONS = ["Practice 1", "Practice 2", "Practice 3",
+            "Sprint Qualifying", "Sprint", "Qualifying", "Race"]
 
-BASE = (f"https://raw.githubusercontent.com/TracingInsights/{YEAR}/main/"
-        f"{quote(GRAND_PRIX)}/{quote(SESSION)}/")
 
+# ---------- Strumenti per scaricare i dati ----------
 
 def get_json(url):
     """Scarica un file di dati. Se non esiste, si ferma con un messaggio chiaro."""
     response = requests.get(url)
     if response.status_code != 200:
-        raise SystemExit(f"Dati non trovati:\n{url}\n"
-                         "Controlla anno, Gran Premio, sessione e sigla del pilota.")
+        raise SystemExit(f"Dati non trovati:\n{url}")
     return response.json()
 
+
+def exists(url):
+    """True se il file esiste online."""
+    return requests.head(url).status_code == 200
+
+
+# ---------- Strumenti per farti scegliere ----------
+
+def choose(title, options):
+    """Mostra una lista numerata e ti fa scegliere un numero."""
+    print(f"\n{title}")
+    for number, option in enumerate(options, start=1):
+        print(f"{number:3}. {option}")
+    while True:
+        answer = input("Scrivi il numero e premi Invio: ").strip()
+        if answer.isdigit() and 1 <= int(answer) <= len(options):
+            return options[int(answer) - 1]
+        print("Numero non valido, riprova.")
+
+
+def grand_prix_list(year):
+    """I Gran Premi disponibili per quell'anno (le cartelle del repository dei dati)."""
+    response = requests.get(f"https://api.github.com/repos/TracingInsights/{year}/contents/")
+    if response.status_code != 200:
+        return []
+    return [item["name"] for item in response.json()
+            if item["type"] == "dir" and ("Grand Prix" in item["name"] or "Testing" in item["name"])]
+
+
+# ---------- Tempi e giri ----------
 
 def lap_time_text(seconds):
     """Trasforma 78.792 in '1:18.792'."""
@@ -36,9 +59,9 @@ def is_valid(time, deleted):
     return isinstance(time, (int, float)) and not deleted
 
 
-def ranking():
+def ranking(base):
     """Classifica della sessione: il giro più veloce di ogni pilota, dal primo all'ultimo."""
-    laps = get_json(BASE + "session_laptimes.json")
+    laps = get_json(base + "session_laptimes.json")
     deleted_list = laps.get("del", [False] * len(laps["time"]))
     best = {}
     for driver, time, deleted in zip(laps["drv"], laps["time"], deleted_list):
@@ -47,9 +70,9 @@ def ranking():
     return sorted(best.items(), key=lambda item: item[1])
 
 
-def fastest_lap(driver):
-    """Trova il giro valido più veloce di un pilota: (numero del giro, tempo in secondi)."""
-    laps = get_json(BASE + f"{driver}/laptimes.json")
+def fastest_lap(base, driver):
+    """Il giro valido più veloce di un pilota: (numero del giro, tempo in secondi)."""
+    laps = get_json(base + f"{driver}/laptimes.json")
     deleted_list = laps.get("del", [False] * len(laps["time"]))
     best = None
     for lap, time, deleted in zip(laps["lap"], laps["time"], deleted_list):
@@ -58,40 +81,64 @@ def fastest_lap(driver):
     return best
 
 
-def telemetry(driver, lap):
+def telemetry(base, driver, lap):
     """Scarica la telemetria di un giro e la mette in una tabella."""
-    data = get_json(BASE + f"{driver}/{lap}_tel.json")
+    data = get_json(base + f"{driver}/{lap}_tel.json")
     return pd.DataFrame(data["tel"])
 
 
-# ---------- 1. Classifica della sessione ----------
-order = ranking()
+# ================= 1. SCEGLI ANNO, GARA E SESSIONE =================
+
+year = input("Anno (dal 2018 al 2026, Invio = 2026): ").strip() or "2026"
+
+grands_prix = grand_prix_list(year)
+if grands_prix:
+    grand_prix = choose(f"Gran Premi {year}:", grands_prix)
+else:
+    print("\nNon riesco a scaricare l'elenco dei Gran Premi.")
+    grand_prix = input("Scrivi il nome esatto (es. Italian Grand Prix): ").strip()
+
+event = f"{DATA}/{year}/main/{quote(grand_prix)}/"
+available = [s for s in SESSIONS if exists(event + quote(s) + "/session_laptimes.json")]
+if not available:
+    raise SystemExit(f"Nessun dato per {year} {grand_prix}. Controlla anno e nome.")
+session = choose("Sessioni disponibili:", available)
+
+base = event + quote(session) + "/"
+
+# ================= 2. CLASSIFICA E SCELTA DEI PILOTI =================
+
+order = ranking(base)
 leader_time = order[0][1]
-print(f"\n{YEAR} {GRAND_PRIX} – {SESSION}: classifica per giro più veloce\n")
+print(f"\n{year} {grand_prix} – {session}: classifica per giro più veloce\n")
 for position, (driver, time) in enumerate(order, start=1):
     gap = "" if position == 1 else f"+{time - leader_time:.3f}"
     print(f"{position:2}. {driver}  {lap_time_text(time)}  {gap}")
-print()
 
-drivers = DRIVERS if DRIVERS else [order[0][0], order[1][0]]
+all_drivers = [driver for driver, time in order]
+while True:
+    answer = input("\nPiloti da confrontare, separati da spazio "
+                   "(es. VER LEC, Invio = primi due): ").upper().split()
+    drivers = answer or all_drivers[:2]
+    unknown = [d for d in drivers if d not in all_drivers]
+    if not unknown:
+        break
+    print(f"Non trovo {', '.join(unknown)} in questa sessione, riprova.")
 
-# ---------- 2. Grafici ----------
+# ================= 3. GRAFICI =================
+
 fig, ax = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
 
 for driver in drivers:
-    best = fastest_lap(driver)
-    if best is None:
-        print(f"{driver}: nessun giro valido in questa sessione, lo salto")
-        continue
-    lap, time = best
-    tel = telemetry(driver, lap)
+    lap, time = fastest_lap(base, driver)
+    tel = telemetry(base, driver, lap)
     print(f"Grafico: {driver}, giro {lap}, {lap_time_text(time)}")
 
     ax[0].plot(tel["distance"], tel["speed"], label=f"{driver}  {lap_time_text(time)}")
     ax[1].plot(tel["distance"], tel["throttle"])
     ax[2].plot(tel["distance"], tel["brake"])
 
-ax[0].set_title(f"{YEAR} {GRAND_PRIX} – {SESSION} – giro più veloce")
+ax[0].set_title(f"{year} {grand_prix} – {session} – giro più veloce")
 ax[0].set_ylabel("Velocità (km/h)")
 ax[0].legend()
 ax[1].set_ylabel("Acceleratore (%)")
